@@ -1,0 +1,868 @@
+Introduction
+Lorsque j'ai commencé mon rôle actuel de responsable de la technologie marketing chez ABOUT YOU en 2016, nous nous sommes fortement appuyés sur Vagrant (à savoir : Homestead) comme infrastructure de développement . Bien que ce soit bien mieux que de travailler sur nos machines locales, nous avons rencontré quelques problèmes en cours de route (par exemple, logiciels divergents, images gonflées, temps de démarrage lents, fichier readme compliqué pour l'intégration, mise à niveau de php, ...).
+
+Aujourd'hui, tout ce dont nous avons besoin pour l'infrastructure est sous contrôle de code source et validé dans le même référentiel que celui que nous utilisons pour notre application principale. En effet, nous obtenons la même infrastructure pour chaque développeur, y compris les mises à jour automatiques "gratuites". Il est extrêmement facile de bricoler avec les mises à jour/nouveaux outils en raison de la nature éphémère de Docker, car le démontage et la reconstruction ne prennent qu'une seule commande et quelques minutes.
+
+Pour avoir une idée de la sensation du processus , exécutez simplement les commandes suivantes.
+git clone https://github.com/paslandau/docker-php-tutorial.git
+cd docker-php-tutorial
+git checkout part_3_structuring-the-docker-setup-for-php-projects
+make docker-clean
+make docker-init
+make docker-build-from-scratch
+make docker-test
+Vous devriez maintenant avoir un environnement docker en cours d'exécution pour développer PHP sur docker (sauf si quelque chose bloque votre port 80/443 ou si make n'est pas installé
+;))
+
+Structuration du référentiel
+En jouant avec docker, j'ai essayé différentes manières de "structurer" les fichiers et les dossiers et j'ai abouti aux concepts suivants :
+
+tout ce qui concerne docker est placé dans un .dockerrépertoire au même niveau que l'application principale
+dans ce répertoire
+chaque service obtient son propre sous-répertoire pour la configuration
+est un .shareddossier contenant les scripts et la configuration requis par plusieurs services
+est un .env.examplefichier contenant des variables pour ledocker-compose.yml
+est un docker-test.shfichier contenant des tests de haut niveau pour valider les conteneurs docker
+un Makefile avec des instructions communes pour contrôler Docker est placé à la racine du référentiel
+Le résultat ressemble à peu près à ceci :
+<project>/
+├── .docker/
+|   ├── .shared/
+|   |   ├── config/
+|   |   └── scripts/
+|   ├── php-fpm/
+|   |   └── Dockerfile
+|   ├── ... <additional services>/
+|   ├── .env.example
+|   ├── docker-compose.yml
+|   └── docker-test.sh
+├── Makefile
+├── index.php
+└──  ... <additional app files>/
+Le dossier .docker
+Comme je l'ai mentionné, pour moi, il est très logique de garder la définition de l'infrastructure proche de la base de code , car elle est immédiatement disponible pour chaque développeur. Pour les projets plus importants avec plusieurs composants, il y aura de toute façon un couplage code-infrastructure (par exemple, d'après mon expérience, il n'est généralement pas possible de simplement passer de MySQL à PostgreSQL sans aucun autre changement) et pour une bibliothèque, c'est très pratique (bien que opiniâtre) façon de commencer.
+
+Personnellement, je trouve cela plutôt frustrant lorsque je veux contribuer à un projet open source, mais que je passe beaucoup de temps à configurer correctement l'environnement au lieu de pouvoir simplement travailler sur le code.
+
+Ymmv, cependant (par exemple, parce que vous ne voulez pas que toutes les personnes ayant un accès en écriture à votre dépôt d'application puissent également modifier votre code d'infrastructure). Nous avons en fait suivi un chemin différent auparavant et avions un deuxième référentiel ("-inf") qui contiendrait le contenu du .dockerdossier :
+<project-inf>/
+├── .shared/
+|   ├── config/
+|   └── scripts/
+├── php-fpm/
+|   └── Dockerfile
+├── ... <additional services>/
+├── .env.example
+└──  docker-compose.yml
+
+<project>/
+├── index.php
+└──  ... <additional app files>/
+Fonctionnait également, mais nous nous sommes souvent heurtés à des situations où le contenu du dépôt serait obsolète pour certains développeurs, et il s'agissait simplement d'une surcharge supplémentaire sans autres avantages pour nous à ce stade. Peut-être que les sous- modules git nous permettront d'obtenir le meilleur des deux mondes - j'en parlerai dans un blog une fois que nous aurons essayé ;)
+
+Le .shareddossier
+Lorsqu'il s'agit de plusieurs services, il y a de fortes chances que certains de ces services soient configurés de la même manière, par exemple pour
+
+installation de logiciels communs
+configuration des utilisateurs unix (avec les mêmes identifiants)
+configuration (pensez à php-cli pour les travailleurs et à php-fpm pour les requêtes Web)
+Pour éviter la duplication, je place des scripts (fichiers bash simples) et des fichiers de configuration dans le .shareddossier et je les rends disponibles dans le contexte de construction pour chaque service. J'expliquerai le processus plus en détail en fournissant le contexte de construction correct .
+
+docker-test.sh
+Est vraiment juste un simple script bash qui inclut des tests de haut niveau pour s'assurer que les conteneurs sont construits correctement. Voir la section Tester si tout fonctionne .
+
+.env.exampleetdocker-compose.yml
+docker-composeutilise un .envfichier pour un moyen pratique de définir et substitute environment variables. Étant donné que ce .envfichier est spécifique à l'environnement, il ne fait PAS
+partie du référentiel (c'est-à-dire qu'il est ignoré via .gitignore). Au lieu de cela, nous fournissons un .env.examplefichier contenant les variables d'environnement requises, y compris des valeurs par défaut raisonnables. Un nouveau développeur s'exécuterait généralement cp .env.example .envaprès avoir vérifié le référentiel pour la première fois. Voir section .env.example .
+
+Le Makefile makeet Makefiles
+font partie de ces choses dont j'ai entendu parler occasionnellement mais que je n'ai jamais vraiment voulu comprendre (principalement parce que je les ai associées au C). Boy, ai-je raté. Je comparais différentes stratégies pour fournir des outils de qualité de code (vérificateurs de style, analyseurs statiques, tests, ...) et je suis passé de scripts bash personnalisés à des scripts de composition pour finalement aboutir à Makefiles.
+
+Le Makefilesert de point d'entrée central et simplifie la gestion des conteneurs Docker, par exemple pour (re-)construire, démarrer, arrêter, se connecter, etc. Voir la section Makefile et .bashrc .
+
+Définition des services : php-fpm, nginx et espace de travail
+Examinons un exemple réel et "refactorisons" les conteneurs php-cli , php-fpm et nginx de la première partie de cette série de tutoriels .
+
+Voici la structure du dossier :
+<project>/
+├── .docker/
+|   ├── .shared/
+|   |   ├── config/
+|   |   |   └── php/ 
+|   |   |       └── conf.d/
+|   |   |           └── zz-app.ini
+|   |   └── scripts/
+|   |       └── docker-entrypoint/
+|   |           └── resolve-docker-host-ip.sh
+|   ├── nginx/
+|   |   ├── sites-available/
+|   |   |   └── default.conf
+|   |   ├── Dockerfile
+|   |   └── nginx.conf
+|   ├── php-fpm/
+|   |   ├── php-fpm.d/
+|   |   |   └── pool.conf
+|   |   └── Dockerfile
+|   ├── workspace/ (formerly php-cli)
+|   |   ├── .ssh/
+|   |   |   └── insecure_id_rsa
+|   |   |   └── insecure_id_rsa.pub
+|   |   └── Dockerfile
+|   ├── .env.example
+|   ├── docker-compose.yml
+|   └── docker-test.sh
+├── Makefile
+└── index.php
+php-fpm
+Cliquez ici pour voir le Dockerfile php-fpm complet .
+
+Comme nous aurons deux conteneurs PHP, nous devons placer les paramètres .ini communs dans le .sharedrépertoire.
+|   ├── .shared/
+|   |   ├── config/
+|   |   |   └── php/ 
+|   |   |       └── conf.d/
+|   |   |           └── zz-app.ini
+Pour l'instant, zz-app.inine contiendra que notre configuration opcache :
+; enable opcache
+opcache.enable_cli = 1
+opcache.enable = 1
+opcache.fast_shutdown = 1
+; revalidate everytime (effectively disabled for development)
+opcache.validate_timestamps = 0
+La configuration du pool n'est pertinente que pour php-fpm, elle va donc dans le répertoire du service. D'ailleurs. Je recommande fortement cette vidéo sur la configuration PHP-FPM si votre foo php-fpm n'est pas déjà supérieur à 9000.
+|   ├── php-fpm/
+|   |   ├── php-fpm.d/
+|   |   |   └── pool.conf
+Modification de la configuration du pool
+Nous utilisons le modify_config.shscript pour définir l'utilisateur et le groupe qui possèdent les processus php-fpm.
+# php-fpm pool config
+COPY ${SERVICE_DIR}/php-fpm.d/* /usr/local/etc/php-fpm.d
+RUN /tmp/scripts/modify_config.sh /usr/local/etc/php-fpm.d/zz-default.conf \
+    "__APP_USER" \
+    "${APP_USER}" \
+ && /tmp/scripts/modify_config.sh /usr/local/etc/php-fpm.d/zz-default.conf \
+    "__APP_GROUP" \
+    "${APP_GROUP}" \
+;
+POINT D'ENTRÉE personnalisé
+Étant donné que php-fpm doit être débogable, nous devons nous assurer que l' host.docker.internalentrée DNS existe, nous utiliserons donc l' ENTRYPOINT correspondant pour le faire.
+# entrypoint
+RUN mkdir -p /bin/docker-entrypoint/ \
+ && cp /tmp/scripts/docker-entrypoint/* /bin/docker-entrypoint/ \
+ && chmod +x -R /bin/docker-entrypoint/ \
+;
+
+ENTRYPOINT ["/bin/docker-entrypoint/resolve-docker-host-ip.sh","php-fpm"]
+nginx
+Cliquez ici pour voir le nginx Dockerfile complet .
+
+La configuration de nginx est encore plus simple. Il n'y a pas de configuration partagée, de sorte que tout ce dont nous avons besoin réside dans
+|   ├── nginx/
+|   |   ├── sites-available/
+|   |   |   └── default.conf
+|   |   ├── Dockerfile
+|   |   └── nginx.conf
+Veuillez noter que nginx n'a que le nginx.conffichier de configuration (c'est-à-dire qu'il n'y a pas de conf.drépertoire ou autre), nous devons donc y définir la configuration complète .
+user __APP_USER __APP_GROUP;
+worker_processes 4;
+pid /run/nginx.pid;
+daemon off;
+
+http {
+  # ...
+
+  include /etc/nginx/sites-available/*.conf;
+
+  # ...
+}
+Il y a deux choses à noter :
+
+l'utilisateur et le groupe sont modifiés dynamiquement
+nous spécifions /etc/nginx/sites-available/comme répertoire contenant les fichiers de configuration pour les fichiers individuels via include /etc/nginx/sites-available/*.conf; Nous devons garder le dernier point à l'esprit, car nous devons utiliser le même répertoire dans le Dockerfile :
+# nginx app config
+COPY ${SERVICE_DIR}/sites-available/* /etc/nginx/sites-available/
+Le fichier de configuration du site default.conf a une variable ( __NGINX_ROOT) pour la rootdirective et nous la "connectons" au conteneur fpm via fastcgi_pass php-fpm:9000;
+server {
+    # ...
+    root __NGINX_ROOT;
+    # ...
+
+    location ~ \.php$ {
+        # ...
+        fastcgi_pass php-fpm:9000;
+    }
+}
+php-fpmrésoudra le php-fpmconteneur, car nous utilisons php-fpm comme nom de service dans le fichier docker-compose, il sera donc automatiquement utilisé comme nom d'hôte :
+
+D'autres conteneurs sur le même réseau peuvent utiliser le nom du service ou [un] alias pour se connecter à l'un des conteneurs du service.
+
+Dans le Dockerfile, nous utilisons
+ARG APP_CODE_PATH
+RUN /tmp/scripts/modify_config.sh /etc/nginx/sites-available/default.conf \
+    "__NGINX_ROOT" \
+    "${APP_CODE_PATH}" \
+;
+APP_CODE_PATHsera transmis via docker-compose lorsque nous construisons le conteneur et monté en tant que répertoire partagé à partir du système hôte.
+
+espace de travail (anciennement php-cli)
+Cliquez ici pour voir l'intégralité de l'espace de travail Dockerfile .
+
+Nous allons utiliser l'ancien php-cliconteneur et le transformer en notre workspacecomme présenté dans la partie 2 de ce tutoriel sous Préparation du conteneur "espace de travail" .
+
+Ce sera le conteneur que nous utiliserons pour pointer notre IDE, par exemple pour exécuter des tests. Son Dockerfile semble presque identique à celui du php-fpmservice, à l'exception de la configuration SSH :
+# set up ssh
+RUN apt-get update -yqq && apt-get install -yqq openssh-server \
+ && mkdir /var/run/sshd \
+;
+
+# add default public key to authorized_keys
+USER ${APP_USER}
+COPY ${SERVICE_DIR}/.ssh/insecure_id_rsa.pub /tmp/insecure_id_rsa.pub
+RUN mkdir -p ~/.ssh \
+ && cat /tmp/insecure_id_rsa.pub >> ~/.ssh/authorized_keys \
+ && chown -R ${APP_USER}: ~/.ssh \
+ && chmod 700 ~/.ssh \
+ && chmod 600 ~/.ssh/authorized_keys \
+;
+USER root
+Mise en place de docker-compose
+Afin d'orchestrer le processus de construction, nous utiliserons docker-compose.
+
+docker-compose.yml
+Voir le fichier docker-compose.yml complet dans le référentiel
+
+À noter :
+
+chaque service utilise context: .pour avoir accès au .shareddossier. Le contexte est toujours relatif à l'emplacement du premier fichier docker-compose.yml
+tous les arguments que nous avons utilisés dans les Dockerfiles sont définis dans la args: section via
+  args:
+    - APP_CODE_PATH=${APP_CODE_PATH_CONTAINER}
+    - APP_GROUP=${APP_GROUP}
+    - APP_GROUP_ID=${APP_GROUP_ID}
+    - APP_USER=${APP_USER}
+    - APP_USER_ID=${APP_USER_ID}
+    - TZ=${TIMEZONE}
+la base de code est synchronisée depuis l'hôte dans tous les conteneurs via
+  volumes:
+    - ${APP_CODE_PATH_HOST}:${APP_CODE_PATH_CONTAINER}
+le nginxservice expose les ports sur la machine hôte afin que nous puissions accéder aux conteneurs de "l'extérieur" via
+  ports:
+    - "${NGINX_HOST_HTTP_PORT}:80"
+    - "${NGINX_HOST_HTTPS_PORT}:443"
+tous les services font partie du backendréseau afin qu'ils puissent communiquer entre eux. Le nginxservice a un alias supplémentaire qui nous permet de définir un nom d'hôte arbitraire via
+  networks:
+    backend:
+      aliases:
+        - ${APP_HOST}
+Je préfère avoir un nom d'hôte dédié par projet (par exemple docker-php-tutorial.local)
+au lieu d'utiliser 127.0.0.1ou localhostdirectement
+
+.env.exemple
+Pour remplir toutes les variables/arguments requis, nous utilisons un .env.examplefichier avec le contenu suivant :
+# Default settings for docker-compose
+COMPOSE_PROJECT_NAME=docker-php-tutorial
+COMPOSE_FILE=docker-compose.yml
+COMPOSE_CONVERT_WINDOWS_PATHS=1
+
+# build
+PHP_VERSION=7.3
+TIMEZONE=UTC
+NETWORKS_DRIVER=bridge
+
+# application
+APP_USER=www-data
+APP_GROUP=www-data
+APP_USER_ID=1000
+APP_GROUP_ID=1000
+APP_CODE_PATH_HOST=../
+APP_CODE_PATH_CONTAINER=/var/www/current
+
+# required so we can reach the nginx server from other containers via that hostname
+APP_HOST=docker-php-tutorial.local
+
+# nginx
+NGINX_HOST_HTTP_PORT=80
+NGINX_HOST_HTTPS_PORT=443
+
+# workspace
+WORKSPACE_HOST_SSH_PORT=2222
+Les COMPOSE_variables au début définissent des valeurs par défaut raisonnables pour docker-compose .
+
+Construire et exécuter les conteneurs À présent, nous devrions avoir tout ce dont nous avons besoin pour que notre développement PHP docker soit opérationnel. Si vous ne l'avez pas déjà fait, ce serait le moment idéal pour cloner le référentiel et vérifier la part_3_structuring-the-docker-setup-for-php-projectsbranche :
+git clone https://github.com/paslandau/docker-php-tutorial.git
+cd docker-php-tutorial
+git checkout part_3_structuring-the-docker-setup-for-php-projects
+Copiez maintenant le .env.exmaplefichier .env. Toutes les valeurs par défaut devraient être prêtes à l'emploi, à moins que vous n'ayez déjà quelque chose en cours d'exécution sur le port 80ou 443. Dans ce cas, vous devez passer NGINX_HOST_HTTP_PORT / NGINX_HOST_HTTP_PORTà un port libre.
+cp .env.example .env
+Nous pouvons examiner le "final" docker-compose.yml après la substitution de variable via
+docker-compose -f .docker/docker-compose.yml --project-directory .docker config
+networks:
+  backend:
+    driver: bridge
+services:
+  nginx:
+    build:
+      args:
+        APP_CODE_PATH: /var/www/current
+        APP_GROUP: www-data
+        APP_GROUP_ID: '1000'
+        APP_USER: www-data
+        APP_USER_ID: '1000'
+        TZ: UTC
+      context: D:\codebase\docker-php-tutorial\.docker
+      dockerfile: ./nginx/Dockerfile
+    image: php-docker-tutorial/nginx
+    networks:
+      backend:
+        aliases:
+        - docker-php-tutorial.local
+    ports:
+    - published: 80
+      target: 80
+    - published: 443
+      target: 443
+    volumes:
+    - /d/codebase/docker-php-tutorial:/var/www/current:rw
+  php-fpm:
+// ...
+
+Notez que cette commande est exécutée à partir de ./docker-php-tutorial. Si nous l'exécutons à partir de ./docker-php-tutorial/.docker, nous pourrions simplement utiliser docker-compose config- mais puisque nous définirons cela dans un Makefile plus tard de toute façon, la "verbosité" supplémentaire n'aura pas d'importance ;)
+
+Cette commande est également un excellent moyen de vérifier les différents chemins qui sont résolus dans leur forme absolue, par exemple
+context: D:\codebase\docker-php-tutorial\.docker
+
+et
+volumes:
+- /d/codebase/docker-php-tutorial:/var/www/current:rw
+La construction proprement dite est déclenchée via
+docker-compose -f .docker/docker-compose.yml --project-directory .docker build --parallel
+
+Puisque nous avons plus d'un conteneur, il est logique de construire avec --parallel.
+
+Pour démarrer les conteneurs, nous utilisons
+docker-compose -f .docker/docker-compose.yml --project-directory .docker up -d
+
+et faut voir
+$ docker-compose -f .docker/docker-compose.yml --project-directory .docker up -d
+Starting docker-php-tutorial_nginx_1     ... done
+Starting docker-php-tutorial_workspace_1 ... done
+Starting docker-php-tutorial_php-fpm_1   ... done
+Essai
+si tout fonctionne Après avoir réécrit notre propre configuration de menu fixe à plusieurs reprises, j'en suis venu à apprécier une manière structurée de tester si "tout" fonctionne. Tout comme dans :
+
+tous les conteneurs sont-ils en cours d'exécution ?
+"host.docker.internal" existe-t-il ?
+voyons-nous la sortie correcte lors de l'envoi d'une requête à nginx/php-fpm ?
+toutes les extensions php requises sont-elles installées ?
+Cela peut sembler superflu (après tout, nous venons de définir exactement cela dans les Dockerfiles), mais il viendra un moment où vous (ou quelqu'un d'autre) devrez apporter des modifications (nouvelle version PHP, nouvelles extensions, etc.) et avoir quelque chose qui s'exécute automatiquement et vous informe des défauts évidents est un véritable gain de temps.
+
+Vous pouvez voir le fichier de test complet dans le référentiel . Comme mon bash n'est pas le meilleur, j'essaie de le garder aussi simple que possible. Les tests peuvent être exécutés via
+sh .docker/docker-test.sh
+et devrait donner quelque chose comme ça :
+Testing service 'workspace'
+=======
+Checking if 'workspace' has a running container
+OK
+Testing PHP version '7.3' on 'workspace' for 'php' and expect to see 'PHP 7.3'
+OK
+Testing PHP module 'xdebug' on 'workspace' for 'php'
+OK
+Testing PHP module 'Zend OPcache' on 'workspace' for 'php'
+OK
+Checking 'host.docker.internal' on 'workspace'
+OK
+
+Testing service 'php-fpm'
+=======
+...
+Makefile et.bashrc
+Dans les sections précédentes, j'ai introduit quelques commandes, par exemple pour construire et exécuter des conteneurs. Et pour être honnête, je trouve un peu difficile de les garder à l'esprit sans avoir à rechercher les options et les arguments exacts. Je créerais généralement une fonction d'assistance ou un alias dans mon .bashrcfichier local dans une situation comme celle-là - mais cela ne serait alors pas disponible pour les autres membres de l'équipe et ce serait très spécifique à ce projet. Au lieu de cela, nous fournirons a Makefilecomme point de référence central.
+
+Utilisation makecomme point d'entrée central
+Veuillez vous référer au référentiel pour le fichierMakefile .
+
+Entrer dans les détails makeest un peu hors de portée pour cet article, donc je me réfère gentiment à certains articles qui m'ont aidé à démarrer :
+
+Makefile pour les développeurs paresseux
+Pourquoi avez-vous besoin d'un Makefile sur votre projet
+Les deux sont écrits avec un contexte PHP à l'esprit. Astuce : Si vous utilisez PhpStorm, essayez le plugin de support Makefile . Et n'oubliez pas la règle numéro un : A Makefilenécessite des onglets !
+
+Remarque : Si vous utilisez Windows, maken'est probablement pas disponible. Voir Installer make sur Windows (MinGW) pour les instructions de configuration.
+
+L' Makefileist se trouve à la racine de l'application. Puisque nous utilisons une helpcible qui rend l' Makefileauto-documentation , nous pouvons simplement exécuter makepour voir toutes les commandes disponibles :
+$ make
+
+Usage:
+  make <target>
+
+[Docker] Build / Infrastructure
+  docker-clean                 Remove the .env file for docker
+  docker-init                  Make sure the .env file exists for docker
+  docker-build-from-scratch    Build all docker images from scratch, without cache etc. Build a specific image by providing the service name via: make docker-build CONTAINER=<service>
+  docker-build                 Build all docker images. Build a specific image by providing the service name via: make docker-build CONTAINER=<service>
+  docker-up                    Start all docker containers. To only start one container, use CONTAINER=<service>
+  docker-down                  Stop all docker containers. To only stop one container, use CONTAINER=<service>
+  docker-test                  Run the infrastructure tests for the docker setup
+En tant que nouveau développeur, votre "intégration" pour obtenir une infrastructure en cours d'exécution devrait maintenant ressembler à ceci :
+make docker-clean
+make docker-init
+make docker-build-from-scratch
+make docker-test
+
+Accès facile au conteneur via l' dinassistant .bashrc
+J'ai un dernier goodie pour travailler avec Docker que j'utilise tout le temps :
+
+Connexion à un conteneur en cours d'exécution via docker execet l' din / dshellassistant.
+
+
+GIF
+Connectez-vous à n'importe quel conteneur docker en cours d'exécution via din helper
+
+Pour que cela fonctionne, mettez le code suivant dans votre .bashrcfichier
+function din() {
+  filter=$1
+
+  user=""
+  if [[ -n "$2" ]];
+  then
+    user="--user $2"
+  fi
+
+  shell="bash"
+  if [[ -n "$3" ]];
+  then
+    shell=$3
+  fi
+
+  prefix=""
+  if [[ "$(expr substr $(uname -s) 1 5)" == "MINGW" ]]; then
+    prefix="winpty"
+  fi
+  ${prefix} docker exec -it ${user} $(docker ps --filter name=${filter} -q | head -1) ${shell}
+}
+La $(docker ps --filter name=${filter} -q | head -1)partie trouvera des correspondances partielles sur les conteneurs en cours d'exécution pour le premier argument et transmettra le résultat à la docker execcommande. En effet, nous pouvons nous connecter à n'importe quel conteneur en fournissant uniquement une chaîne minimale correspondante sur le nom du conteneur. Par exemple, pour me connecter au workspaceconteneur, je peux maintenant simplement taper din worksdepuis n'importe où sur mon système.
+
+Fondamentaux sur la construction des conteneurs
+Puisque nous avons maintenant "vu" le résultat final, regardons de plus près les coulisses. Je suppose que vous êtes déjà un peu familier avec Dockerfiles et que vous avez utilisé docker-composepour orchestrer plusieurs services (sinon, consultez Persisting image changes with a Dockerfile and Putting it all together: Meet docker-compose ). Mais il y a certains points que je voudrais aborder un peu plus en détail.
+
+Comprendre le contexte de construction
+Il y a deux parties essentielles lors de la construction d'un conteneur :
+
+le Dockerfile
+le contexte de construction
+Vous pouvez lire la description officielle dans la référence Dockerfile . Vous verrez généralement quelque chose comme ceci :
+docker build .
+
+qui suppose que vous utilisez le répertoire actuel comme contexte de construction et qu'il existe un Dockerfile dans le même répertoire.
+
+Mais vous pouvez également démarrer la construction via
+docker build .docker -f .docker/nginx/Dockerfile
+                 |      |
+                 |      └── use the Dockerfile at ".docker/nginx/Dockerfile"
+                 |
+                 └── use the .docker subdirectory as build context
+Pour moi, l'essentiel est le suivant : le contexte de construction définit les fichiers et les dossiers (de manière récursive) sur votre machine qui sont envoyés de la CLI Docker au démon Docker qui exécute le processus de construction d'un conteneur afin que vous puissiez référencer ces fichiers dans le Dockerfile (par exemple via COPY). Prenons par exemple la structure suivante :
+<project>/
+├── .docker/
+    ├── .shared/
+    |   └── scripts/
+    |       └── ...
+    └── nginx/
+        ├── nginx.conf
+        └── Dockerfile
+Supposons que le répertoire de travail actuel est <project>/. Si nous avons commencé une construction via
+docker build .docker/nginx -f .docker/nginx/Dockerfile
+
+le contexte n'inclurait pas.shared le dossier, nous ne pourrions donc pas accéder au sous COPY- scripts/dossier. Si nous avons couru
+docker build .docker -f .docker/nginx/Dockerfile
+
+cependant, cela rendrait le .shareddossier disponible. Dans le Dockerfile lui-même, j'ai besoin de savoir quel est le contexte de construction, car je dois ajuster les chemins en conséquence. Exemple concret pour la structure de dossier ci-dessus et build déclenché via docker build .docker -f .docker/nginx/Dockerfile:
+FROM:nginx
+
+# build context is .docker ...
+
+# ... so the following COPY refers to .docker/.shared
+COPY ./.shared /tmp
+
+# ... so the following COPY refers to .docker/nginx/nginx.conf
+COPY ./nginx/nginx.conf /tmp
+Le contexte de construction pour tous nos conteneurs sera le .dockerrépertoire, de sorte que tous les processus de construction aient accès aux .sharedscripts et à la configuration. Oui, cela signifie également que le php-fpmconteneur a accès à des fichiers qui ne concernent que le mysqlconteneur (par exemple), mais la pénalité de performance est absolument négligeable. De plus, tant que nous ne traitons pas activement COPYces fichiers non pertinents, ils ne gonfleront pas nos images.
+
+Quelques remarques :
+
+J'avais l'habitude de penser que le contexte de construction est toujours lié à l'emplacement du Dockerfile mais ce n'est que la valeur par défaut, il peut s'agir de n'importe quel répertoire
+le contexte de construction est en fait envoyé au processus de construction - c'est-à-dire que vous devez éviter les fichiers/dossiers inutiles car cela pourrait affecter les performances, en particulier sur les gros fichiers (c'est-à-dire : ne pas utiliser /comme contexte !)
+similaire à git, Docker connaît le concept de .dockerignorefichier pour exclure les fichiers de l'inclusion dans le contexte de construction
+Modèle Dockerfile
+Les Dockerfiles pour les conteneurs suivent à peu près la structure décrite ci-dessous :
+FROM ...
+
+# path to the directory where the Dockerfile lives relative to the build context
+ARG SERVICE_DIR="./service"
+
+# get the scripts from the build context and make sure they are executable
+COPY .shared/scripts/ /tmp/scripts/
+RUN chmod +x -R /tmp/scripts/
+
+# set timezone
+ARG TZ=UTC
+RUN /tmp/scripts/set_timezone.sh ${TZ}
+
+# add users
+ARG APP_USER=www-data
+ARG APP_USER_ID=1000
+ARG APP_GROUP=$(APP_USER)
+ARG APP_GROUP_ID=$(APP_USER_ID)
+
+RUN /tmp/scripts/create_user.sh ${APP_USER} ${APP_GROUP} ${APP_USER_ID} ${APP_GROUP_ID}
+
+# install common software
+RUN /tmp/scripts/install_software.sh
+
+# perform any other, container specific build steps
+COPY ${SERVICE_DIR}/config/* /etc/service/config
+RUN /tmp/scripts/modify_config.sh /etc/service/config/default.conf \
+    "__APP_USER" \
+    "${APP_USER}" \
+;
+# [...]
+
+# set default work directory
+WORKDIR "..."
+
+# cleanup 
+RUN /tmp/scripts/cleanup.sh
+
+# define ENTRYPOINT
+ENTRYPOINT [...]
+CMD [...]
+Les commentaires devraient suffire à vous donner un aperçu - parlons donc des différentes parties en détail.
+
+Réglage du fuseau horaire
+Scénario:set_timezone.sh
+
+Commençons par une simple et évidente : s'assurer que tous les conteneurs utilisent le même fuseau horaire système (voir ici et ici )
+#!/bin/sh
+
+TZ=$1
+ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
+Le script est alors appelé depuis le Dockerfilevia
+ARG TZ=UTC
+RUN /tmp/scripts/set_timezone.sh ${TZ}
+Synchronisation de la propriété des fichiers et dossiers sur les volumes partagés
+Scénario:create_user.sh
+
+Docker facilite le partage de fichiers entre conteneurs en utilisant des volumes . Par souci de simplicité, vous pouvez imaginer un volume simplement comme un disque supplémentaire auquel plusieurs conteneurs ont accès. Et puisque c'est de PHP dont nous parlons ici, le partage des mêmes fichiers d'application est une exigence courante (par exemple pour php-fpm, nginx, php-workers).
+
+Tant que vous n'avez affaire qu'à un seul conteneur, la vie est simple : vous pouvez simplement chownenvoyer des fichiers au bon utilisateur. Mais comme les conteneurs peuvent avoir une configuration utilisateur différente, les autorisations/propriété deviennent un problème. Regardez cette vidéo sur Docker & File Permissions pour un exemple pratique dans une application Laravel.
+
+La première chose pour moi a été de comprendre que la propriété du fichier ne dépend pas du nom d'utilisateur mais plutôt de l' identifiant de l'utilisateur . Et vous l'avez peut-être deviné : deux conteneurs peuvent avoir un utilisateur portant le même nom mais avec un identifiant différent. La même chose est vraie pour les groupes, btw. Vous pouvez vérifier l'ID en exécutant id <name>, par exemple
+id www-data
+uid=33(www-data) gid=33(www-data) groups=33(www-data)
+Propriété de fichiers avec plusieurs conteneurs utilisant un volume partagé
+
+C'est peu pratique mais plutôt facile à résoudre dans la plupart des cas, car nous avons un contrôle total sur les conteneurs et pouvons attribuer des identifiants comme nous le souhaitons (en utilisant usermod -u <id> <name>) et ainsi nous assurer que chaque conteneur utilise les mêmes noms d'utilisateur avec les mêmes identifiants d'utilisateur.
+
+Les choses se compliquent lorsque le volume n'est pas simplement un volume Docker mais un dossier partagé sur l'hôte. C'est généralement ce que nous voulons pour le développement, afin que les modifications sur l'hôte soient immédiatement répercutées dans tous les conteneurs.
+
+Propriété de fichiers avec plusieurs conteneurs utilisant un volume partagé à partir de l'hôte
+
+Ce problème n'affecte que les utilisateurs disposant d'un système hôte Linux ! Docker Desktop (anciennement Docker pour Mac / Docker pour Win) dispose d'une couche de virtualisation intermédiaire qui effacera efficacement tous les paramètres de propriété et rendra tout ce qui est partagé depuis l'hôte disponible pour chaque utilisateur dans un conteneur.
+
+Nous utilisons le script suivant pour garantir une configuration utilisateur cohérente lors de la création d'un conteneur :
+#!/bin/sh
+
+APP_USER=$1
+APP_GROUP=$2
+APP_USER_ID=$3
+APP_GROUP_ID=$4
+
+new_user_id_exists=$(id ${APP_USER_ID} > /dev/null 2>&1; echo $?) 
+if [ "$new_user_id_exists" = "0" ]; then
+    (>&2 echo "ERROR: APP_USER_ID $APP_USER_ID already exists - Aborting!");
+    exit 1;
+fi
+
+new_group_id_exists=$(getent group ${APP_GROUP_ID} > /dev/null 2>&1; echo $?) 
+if [ "$new_group_id_exists" = "0" ]; then
+    (>&2 echo "ERROR: APP_GROUP_ID $APP_GROUP_ID already exists - Aborting!");
+    exit 1;
+fi
+
+old_user_id=$(id -u ${APP_USER})
+old_user_exists=$(id -u ${APP_USER} > /dev/null 2>&1; echo $?) 
+old_group_id=$(getent group ${APP_GROUP} | cut -d: -f3)
+old_group_exists=$(getent group ${APP_GROUP} > /dev/null 2>&1; echo $?)
+
+if [ "$old_group_id" != "${APP_GROUP_ID}" ]; then
+    # create the group
+    groupadd -f ${APP_GROUP}
+    # and the correct id
+    groupmod -g ${APP_GROUP_ID} ${APP_GROUP}
+    if [ "$old_group_exists" = "0" ]; then
+        # set the permissions of all "old" files and folder to the new group
+        find / -group $old_group_id -exec chgrp -h ${APP_GROUP} {} \; || true
+    fi 
+fi
+
+if [ "$old_user_id" != "${APP_USER_ID}" ]; then
+    # create the user if it does not exist
+    if [ "$old_user_exists" != "0" ]; then
+        useradd ${APP_USER} -g ${APP_GROUP}
+    fi
+
+    # make sure the home directory exists with the correct permissions
+    mkdir -p /home/${APP_USER} && chmod 755 /home/${APP_USER} && chown ${APP_USER}:${APP_GROUP} /home/${APP_USER} 
+
+    # change the user id, set the home directory and make sure the user has a login shell
+    usermod -u ${APP_USER_ID} -m -d /home/${APP_USER} ${APP_USER} -s $(which bash)
+
+    if [ "$old_user_exists" = "0" ]; then
+        # set the permissions of all "old" files and folder to the new user 
+        find / -user $old_user_id -exec chown -h ${APP_USER} {} \; || true
+    fi
+fi
+Le script est alors appelé depuis le Dockerfilevia
+ARG APP_USER=www-data
+ARG APP_USER_ID=1000
+ARG APP_GROUP=$(APP_USER)
+ARG APP_GROUP_ID=$(APP_USER_ID)
+
+RUN /tmp/scripts/create_user.sh ${APP_USER} ${APP_GROUP} ${APP_USER_ID} ${APP_GROUP_ID}
+Les valeurs par défaut peuvent être remplacées en transmettant les arguments de construction correspondants .
+
+Les utilisateurs Linux doivent utiliser l'ID utilisateur de l'utilisateur sur leur système hôte - pour les utilisateurs de Docker Desktop, les valeurs par défaut conviennent.
+
+Modification des fichiers de configuration
+Pour la plupart des services, nous avons probablement besoin de paramètres de configuration personnalisés, tels que
+
+définir les valeurs de php.ini
+changer l'utilisateur par défaut d'un service
+changer l'emplacement des fichiers journaux
+Il existe quelques approches courantes pour modifier la configuration de l'application dans Docker et nous essayons actuellement de nous en tenir à deux règles : 1. fournir des fichiers supplémentaires qui remplacent les valeurs par défaut si possible 2. modifier les valeurs non statiques avec une simple recherche et remplacement via sedpendant le construction de conteneur
+
+Fournir des fichiers de configuration supplémentaires
+La plupart des services permettent la spécification de fichiers de configuration supplémentaires qui remplacent les valeurs par défaut dans un fichier de configuration par défaut. C'est formidable car nous n'avons besoin que de définir les paramètres qui nous intéressent réellement au lieu de copier un fichier complet avec de nombreuses valeurs redondantes.
+
+Prenez le php.inifichier par exemple : il permet de placer des .inifichiers supplémentaires dans un répertoire spécifique qui remplacent les valeurs par défaut. Un moyen simple de trouver ce répertoire est php -i | grep "additional .ini":
+$ php -i | grep "additional .ini"
+Scan this dir for additional .ini files => /usr/local/etc/php/conf.d
+Ainsi, au lieu de fournir un fichier "complet" php.ini, nous utiliserons un zz-app.inifichier à la place, qui ne contient que les paramètres .ini que nous voulons réellement modifier et le placer sous /usr/local/etc/php/conf.d.
+
+Pourquoi zz-? Car
+
+[...] Dans chaque répertoire, PHP analysera tous les fichiers se terminant par .ini dans l'ordre alphabétique.
+
+donc si nous voulons nous assurer que nos fichiers .ini viennent en dernier (en remplaçant tous les paramètres précédents), nous lui donnerons un préfixe correspondant :)
+
+Le processus complet ressemblerait à ceci :
+
+placez le fichier dans le .dockerdossier, par exemple à.docker/.shared/config/php/conf.d/zz-app.ini
+passer le dossier comme contexte de construction
+dans le Dockerfile, utilisezCOPY .shared/config/php/conf.d/zz-app.ini /usr/local/etc/php/conf.d/zz-app.ini
+Modification des valeurs non statiques
+Scénario:modify_config.sh
+
+Certaines valeurs de configuration sont soumises à des paramètres locaux et ne doivent donc pas être codées en dur dans les fichiers de configuration. Prenons l' exemple memory_limitde la configurationphp-fpm : peut-être qu'un membre de l'équipe ne peut dédier qu'une quantité limitée de mémoire à docker, il memory_limitdoit donc être maintenu plus bas que d'habitude.
+
+Nous allons tenir compte de ce fait en utilisant une variable préfixée par __au lieu de la valeur réelle et en la remplaçant par un argument dynamique dans le Dockerfile. Exemple pour ce qui précède zz-app.ini:
+memory_limit = __MEMORY_LIMIT
+Nous utilisons le script suivant modify_config.shpour remplacer la valeur :
+#!/bin/sh
+
+CONFIG_FILE=$1
+VAR_NAME=$2
+VAR_VALUE=$3
+
+sed -i -e "s#${VAR_NAME}#${VAR_VALUE}#" "${CONFIG_FILE}"
+Le script est alors appelé depuis le Dockerfilevia
+ARG PHP_FPM_MEMORY_LIMIT=1024M
+
+RUN /tmp/scripts/modify_config.sh \
+    "/usr/local/etc/php/conf.d/zz-app.ini" \
+    "__MEMORY_LIMIT" \
+    "${PHP_FPM_MEMORY_LIMIT}" \
+;
+où PHP_FPM_MEMORY_LIMITa une valeur par défaut de 1024Mmais peut être remplacée lorsque la génération réelle est lancée.
+
+Installation des extensions php
+Scénario:install_php_extensions.sh
+
+Lorsque les extensions php sont manquantes, la recherche sur Google indiquera souvent des réponses pour les systèmes Linux normaux utilisant apt-getou yum, par exemple sudo apt-get install php-xdebug. Mais pour les images docker officielles, la méthode recommandée consiste à utiliser les scripts d'assistance docker-php-ext-configure, docker-php-ext-install et docker-php-ext-enable . Malheureusement, certaines extensions ont des dépendances assez compliquées, de sorte que l'installation échoue. Heureusement, il existe un super projet sur Github appelé docker-php-extension-installer qui s'en charge pour nous et qui est super facile à utiliser :
+FROM php:7.3-cli
+
+ADD https://raw.githubusercontent.com/mlocati/docker-php-extension-installer/master/install-php-extensions /usr/local/bin/
+
+RUN chmod uga+x /usr/local/bin/install-php-extensions && sync && install-php-extensions xdebug
+Le fichier readme contient également un aperçu des extensions prises en charge par version de PHP. Pour garantir que tous nos conteneurs PHP ont les mêmes extensions, nous fournissons le script suivant :
+#!/bin/sh
+
+# add wget
+apt-get update -yqq && apt-get -f install -yyq wget
+
+# download helper script
+wget -q -O /usr/local/bin/install-php-extensions https://raw.githubusercontent.com/mlocati/docker-php-extension-installer/master/install-php-extensions \
+    || (echo "Failed while downloading php extension installer!"; exit 1)
+
+# install all required extensions
+chmod uga+x /usr/local/bin/install-php-extensions && sync && install-php-extensions \
+    xdebug \
+    opcache \
+;
+Si vous n'êtes pas sûr des extensions requises par votre application, essayez ComposerRequireChecker .
+
+Installation de logiciels courants
+Scénario:install_software.sh
+
+Il y a un certain ensemble de logiciels que je veux avoir facilement disponibles dans chaque conteneur. Puisqu'il s'agit d'une configuration de développement, je donnerais la priorité à la facilité d'utilisation/au débogage par rapport aux performances/à la taille de l'image, donc cela peut sembler un peu "trop". Je pense que je suis aussi un peu gâté par mon passé Homestead, parce que c'est tellement pratique d'avoir tout à portée de main :)
+
+Quoi qu'il en soit, le script est simple:
+#!/bin/sh
+
+apt-get update -yqq && apt-get install -yqq \
+    curl \
+    dnsutils \
+    gdb \
+    git \
+    htop \
+    iputils-ping \
+    iproute2 \
+    ltrace \
+    make \
+    procps \
+    strace \
+    sudo \
+    sysstat \
+    unzip \
+    vim \
+    wget \
+;
+Remarques:
+
+cette liste doit correspondre à votre propre ensemble d'outils de référence . Je suis assez ouvert à l'ajout de nouvelles choses ici si cela accélère le workflow de développement. Mais si vous n'avez pas besoin de certains outils, débarrassez-vous-en.
+trier les logiciels par ordre alphabétique est une bonne pratique pour éviter les doublons inutiles. Ne le faites pas à la main, cependant ! Si vous utilisez un éditeur de texte IDE / établi, il y a de fortes chances qu'il s'agisse d'une fonctionnalité intégrée ou d'un plugin disponible. J'utilise Lines Sorter pour PhpStorm
+Nettoyer
+Scénario:cleanup.sh
+
+Agréable et simple :
+#!/bin/sh
+
+apt-get clean
+rm -rf /var/lib/apt/lists/* \
+       /tmp/* \
+       /var/tmp/* \
+       /var/log/lastlog \
+       /var/log/faillog
+Utilisation ENTRYPOINTpour la configuration préalable à l'exécution
+Docker est revenu aux racines d'Unix avec la philosophie do on thing et do it well qui se manifeste dans les instructions CMDetENTRYPOINT .
+
+Comme j'ai eu du mal à comprendre ces instructions lorsque j'ai commencé avec Docker, voici mon point de vue sur la description des termes d'un profane :
+
+puisqu'un conteneur doit faire une chose, nous devons spécifier cette chose. C'est ce qu'on fait avec ENTRYPOINT. Exemples concrets :
+un mysqlconteneur devrait probablement exécuter le mysqlddémon
+un php-fpmconteneur.. eh bien,php-fpm
+le CMDest passé comme argument par défaut auENTRYPOINT
+le ENTRYPOINTest exécuté à chaque fois que nous exécutons un conteneur. Certaines choses ne peuvent pas être faites lors de la construction mais uniquement lors de l'exécution (par exemple, trouver l'adresse IP de l'hôte à partir d'un conteneur - voir la section Fournir host.docker.internaldes systèmes hôtes Linux ) - ENTRYPOINTest une bonne solution à ce problème
+techniquement, nous ne pouvons remplacer qu'une image déjà existante ENTRYPOINTà partir de l'image de base. Mais : On peut structurer le nouveau ENTRYPOINTcomme un décorateur en ajoutant exec "$@"à la fin pour simuler l'héritage de l'image parent
+Pour développer le dernier point, considérons le défaut ENTRYPOINTde l'actuel [2019-02-23 ; PHP 7.3] php-fpmimage
+#!/bin/sh
+
+set -e
+
+# first arg is `-f` or `--some-option`
+if [ "${1#-}" != "$1" ]; then
+    set -- php-fpm "$@"
+fi
+
+exec "$@"
+
+Dans le Dockerfile correspondant, nous trouvons les instructions suivantes :
+# [...]
+ENTRYPOINT ["docker-php-entrypoint"]
+# [...]
+CMD ["php-fpm"]
+
+Cela signifie : lorsque nous exécutons le conteneur, il transmettra la chaîne "php-fpm" au ENTRYPOINTscript docker-php-entrypoint en tant qu'argument qui l'exécutera ensuite (en raison de l' exec "$@"instruction à la fin) :
+$ docker run --name test --rm php:fpm
+[23-Feb-2019 14:49:20] NOTICE: fpm is running, pid 1
+[23-Feb-2019 14:49:20] NOTICE: ready to handle connections
+# php-fpm is running
+# Hit ctrl + c to close the connection
+$ docker stop test
+Nous pourrions maintenant remplacer le CMD"php-fpm" par défaut par quelque chose d'autre, par exemple un simple echo "hello". Le ENTRYPOINTsera heureux de l'exécuter :
+$ docker run --name test --rm php:fpm echo "hello"
+hello
+
+Mais maintenant, le php-fpmprocessus n'est plus lancé. Comment pouvons-nous faire écho à "hello" tout en gardant le processus fpm en cours d'exécution ?
+En ajoutant notre propre ENTRYPOINTscript :
+#!/bin/sh
+echo 'hello'
+
+exec "$@"
+
+Exemple complet (utilisation de stdin pour passer le Dockerfile via la chaîne Heredoc )
+$ docker build -t my-fpm -<<'EOF'
+FROM php:fpm
+
+RUN  touch "/usr/bin/my-entrypoint.sh" \
+  && echo "#!/bin/sh" >> "/usr/bin/my-entrypoint.sh" \
+  && echo "echo 'hello'" >> "/usr/bin/my-entrypoint.sh" \
+  && echo "exec \"\$@\"" >> "/usr/bin/my-entrypoint.sh" \
+  && chmod +x "/usr/bin/my-entrypoint.sh" \
+  && cat "/usr/bin/my-entrypoint.sh" \
+;
+
+ENTRYPOINT ["/usr/bin/my-entrypoint.sh", "docker-php-entrypoint"]
+CMD ["php-fpm"]
+EOF
+
+Notez que nous avons ajouté le ENTRYPOINTde l'image parent docker-php-entrypointcomme argument à notre propre ENTRYPOINTscript /usr/bin/my-entrypoint.shafin de ne pas perdre sa fonctionnalité. Et nous devons définir l' CMDinstruction explicitement, car celle de l'image parent est automatiquement supprimée une fois que nous avons défini la nôtreENTRYPOINT .
+
+Mais : ça marche :
+$ docker run --name test --rm my-fpm
+hello
+[23-Feb-2019 15:43:25] NOTICE: fpm is running, pid 1
+[23-Feb-2019 15:43:25] NOTICE: ready to handle connections
+# Hit ctrl + c to close the connection
+$ docker stop test
+Fournir host.docker.internaldes systèmes hôtes Linux
+Scénario:docker-entrypoint/resolve-docker-host-ip.sh
+
+Dans la partie précédente de cette série de didacticiels, j'ai expliqué comment créer le conteneur Docker de manière à ce qu'il fonctionne bien avec PhpStorm et Xdebug . Les éléments clés étaient l'accès SSH et l' host.docker.internalentrée DNS magique. Cela fonctionne très bien pour Docker Desktop (Windows et Mac) mais pas pour Linux. L'entrée DNS n'existe pas ici . Puisque nous nous appuyons sur cette entrée pour rendre le débogage possible , nous la définirons "manuellement" si l'hôte n'existe pas avec le script suivant (inspiré de l'article Accéder à l'hôte à partir d'un conteneur docker ) :
+#!/bin/sh
+
+set -e
+
+HOST_DOMAIN="host.docker.internal"
+
+# check if the host exists - this will fail on linux
+if dig ${HOST_DOMAIN} | grep -q 'NXDOMAIN'
+then
+  # resolve the host IP
+  HOST_IP=$(ip route | awk 'NR==1 {print $3}')
+  # and write it to the hosts file
+  echo "$HOST_IP\t$HOST_DOMAIN" >> /etc/hosts
+fi
+
+exec "$@"
+Le script est placé .shared/docker-entrypoint/resolve-docker-host-ip.shet ajouté comme ENTRYPOINTdans le Dockerfile via
+COPY .shared/scripts/ /tmp/scripts/
+
+RUN mkdir -p /bin/docker-entrypoint/ \
+ && cp /tmp/scripts/docker-entrypoint/* /bin/docker-entrypoint/ \
+ && chmod +x -R /bin/docker-entrypoint/ \
+;
+
+ENTRYPOINT ["/bin/docker-entrypoint/resolve-docker-host-ip.sh", ...]
+Remarques:
+
+étant donné que ce script dépend de la configuration d'exécution, nous devons l'exécuter en tant queENTRYPOINT
+il n'est pas nécessaire de vérifier explicitement le type de système d'exploitation - nous nous assurons simplement que l'entrée DNS existe et l'ajoutons si ce n'est pas le cas
+nous utilisons dig(package dnsutils) et ip(package iproute2) qui doivent être installés pendant la construction du conteneur. Conseil : Si vous avez besoin de comprendre le package pour une commande spécifique, essayez https://command-not-found.com/ . Voir l' entréedig par exemple.
+cette solution de contournement n'est requise que dans les conteneurs que nous voulons déboguer via xdebug
+Emballer
+Félicitations, vous avez réussi ! Si certaines choses ne sont pas complètement claires maintenant, n'hésitez pas à laisser un commentaire. En dehors de cela, vous devriez maintenant avoir une configuration docker en cours d'exécution pour votre développement PHP local ainsi qu'un bon "flux" pour démarrer chaque jour.
+
+Dans la prochaine partie de ce didacticiel, nous ajouterons d'autres conteneurs (travailleurs php, mysql, redis) et utiliserons une nouvelle installation de Laravel 9 pour les utiliser.
+
+Veuillez vous abonner au flux RSS ou par e-mail pour recevoir des notifications automatiques lorsque cette prochaine partie sortira :)
